@@ -306,7 +306,7 @@ int main(int argc, char* argv[]) {
     
     cout << "========== SIMULADOR ROUND ROBIN ==========\n\n";
     cout << "Trabalho de M2: Sistemas Opeacionais " << endl;
-    cout << "Alunos: Mauro, Celso, " << endl;
+    cout << "Alunos: Mauro, Celso, Luan " << endl;
     
     if (argc > 1) arq = argv[1];
     else {
