@@ -66,7 +66,7 @@ private:
 
     atomic<bool> simAtiva; // Pra thread encerrar (true se estiver ativa)
 
-    atomic<int> tickCnt, numFinalizados; // Contador de tick pra acordar os trabalhos uma vez por tick (Tem 10 000 de ticks pra cada segundo)
+    atomic<int> tickCnt, numFinalizados; // Contador de tick pra acordar os trabalhos uma vez por tick (contador)
 
 
    // Melhor pro quantum dinamico (Quando alocamos processo)
@@ -147,8 +147,10 @@ private:
     void threadNucleo(int nId) { // Id é o iterador (Chamamos em um loop de 0 a N nucleos)
         int lastTick = -1;
         while (simAtiva) { // Todos os processos estao ativos default, condição de parada é a simulação acabar, todos os processos estarem finalizados.
+
             int currentTick = tickCnt.load();
-            if (currentTick == lastTick) { // Contador nao avançou entao dormimos por 1 microsegundo e quebramos o loop ()
+
+            if (currentTick == lastTick) { // Contador nao avançou entao dormimos por 1 microsegundo e continua aguardando
                 sleep_for(microseconds(1));
                 continue;
             }
@@ -190,7 +192,10 @@ private:
                     
                     if (procs[idx].tExecTotal <= 0) { // Acabou
                         procs[idx].estado = FINALIZADO;
-                        procs[idx].tFim = tGlobal + 1;
+
+                        // Alguns processos podem executar antes de tGlobal++, temos que fazer isso na finalização 
+                        procs[idx].tFim = tGlobal + 1; 
+
                         nucleos[nId] = -1; // Esta vazio, pode ser alocado denovo, veja alocarProcs()
                         numFinalizados++;
                     } else if (precBloq) { // Precisa ser bloqueado
