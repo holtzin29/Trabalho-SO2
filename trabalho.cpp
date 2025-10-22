@@ -40,67 +40,108 @@ struct Processo {
                  tempoBloqRestante(0), tExecTotal(0) {}
 };
 
-class Simulador {
+class Simulador { 
 private:
-    int quantumFixo, numNucleos;
-    bool usarQuantumDin;
-    atomic<int> tGlobal;
-    vector<Processo> procs;
-    deque<int> filaProntos;
-    vector<int> filaBloq, nucleos;
-    map<int, vector<int>> gantt;  
-    mutex mtx, mtxGantt;
-    atomic<bool> simAtiva;
-    atomic<int> tickCnt, numFinalizados;
-    vector<int> quantumRestante; 
+    int quantumFixo; // Tamanho do quantum fixo em ticks, para o caso de usarmos quantos fixo e nao dinamico
     
-    int calcQuantumDin() {
-        const size_t sz = filaProntos.size();
-        if (sz <= 2) return quantumFixo;
-        if (sz <= 5) return max(1, quantumFixo - 1);
-        return max(1, quantumFixo - 2);
+    int numNucleos; // Numeros de threads a serem simuladas pelo vetor de nucleos
+
+    bool usarQuantumDin; // Pra função `calcQuantumDin` nao for dinamico, alteramos quanto de quantum usar de acordo com N processos
+
+    /*
+    Usamos os tipos atomic generico pras threads conseguirem ler e modificar as variaveis sem mutex 
+    (Pois se condição de corrida ocorrer, cada operação ocorre como se fosse uma,
+    nao consegue se dividir em duas operações diferentes)
+    */
+    atomic<int> tGlobal; // Tempo global em ticks (Inteiro) pra todas as threads
+
+    deque<int> filaProntos; // Fila de prontos pra serem executados (Usamos deque ao inves de queue pra maior funcionalidade)
+
+    vector<int> filaBloq, nucleos; // Lista de processos bloqueados e vetor de nucleo seria o indice do processo em execução (filaExec)
+
+    map<int, vector<int>> gantt; 
+
+    mutex mtx, mtxGantt; 
+
+    atomic<bool> simAtiva; // Pra thread encerrar (true se estiver ativa)
+
+    atomic<int> tickCnt, numFinalizados; // Contador de tick pra acordar os trabalhos uma vez por tick (Tem 10 000 de ticks pra cada segundo)
+
+
+   // Melhor pro quantum dinamico (Quando alocamos processo)
+   // A cada tick decrementamos o quantum restante (começa no fixo e decrementa ate 0 pro processo sair pra um outro entrar)
+    vector<int> quantumRestante; // Quantum por processo.
+
+    vector<Processo> procs; // Nosso vetor de processos com estado e tempo e id pra cada
+    
+    // Usado para alocar processos -> executar
+    int calcQuantumDin() { 
+        const size_t sz = filaProntos.size(); // deque.size retorna size_t
+
+        if (sz <= 2) return quantumFixo; // Nao precisamos de quantum dinamico se tem poucos prontos pra serem executados
+
+        if (sz <= 5) return max(1, quantumFixo - 1); // Cada processo tem que pelo menos ter 1 de quantum, se quantum for 0 o processo nao avança;
+
+        return max(1, quantumFixo - 2); // Reduzimos em 2 no quantum se a fila for maior que 6, para o quantum ser menor e ter maior rotatividade
     }
     
+    // Usado para execução 
     void verChegadas() {
-        lock_guard<mutex> lk(mtx);
-        for (size_t i = 0; i < procs.size(); i++) {
-            if (procs[i].tempoChegada == tGlobal && procs[i].estado == PRONTO && !procs[i].emFila) {
+        lock_guard<mutex> lk(mtx); // Lock pra garantir que so uma thread por vez chegada nessa func (pelo loop) modifique a fila de prontos
+     
+        for (size_t i = 0; i < procs.size(); i++) { // 
+            // Se o tempo que o processo chegou for igual ao tick global, e estiver pronto pra executar, e nao estiver em fila (Já executando)
+            // Entao podemos adicionar a fila de prontos, colocar o processo em fila, e o tempo de exec total pra controle de espera (Printar)
+            if (procs[i].tempoChegada == tGlobal && procs[i].estado == PRONTO && !procs[i].emFila) { 
                 filaProntos.push_back(i);
                 procs[i].emFila = true;
-                procs[i].tExecTotal = procs[i].exec1 + procs[i].exec2;
+                procs[i].tExecTotal = procs[i].exec1 + procs[i].exec2; 
+                // Nao precisamos marcar como pronto estado pois ele ja esta pronto
             }
         }
-    }
+    } // Note que, nao precisamos dar unlock(), ja que lock_guard() faz isso automaticamente quando saimos do escopo dessa funçao e lock guard é destruido, 
+     // E em destruição, lock guard faz mutex.unlock
     
+    // Usado para funçao executar() para desbloquear processos pendentes em um unico contador de tempo tick.
     void verDesbloq() {
         lock_guard<mutex> lk(mtx);
-        filaBloq.erase(remove_if(filaBloq.begin(), filaBloq.end(), [this](int idx) {
+        // Tiramos da fila de bloqueado se ele tiver na fila (entre o começo e o fim), e se o tempo de bloqueado for = 0 ou menor que 0 pra alguns casos que nao consiguimos tirar.
+        filaBloq.erase(remove_if(filaBloq.begin(), filaBloq.end(), [this](int idx) { // func lambda anonima pra cada indice da fila de bloqueadas, serve como ponteiro da classe [this] pra acessar processos e fila de prontos
             procs[idx].tempoBloqRestante--;
             if (procs[idx].tempoBloqRestante <= 0) {
-                procs[idx].estado = PRONTO;
+                procs[idx].estado = PRONTO; // O processo esta pronto denovo e nao bloqueado.
                 filaProntos.push_back(idx);
                 procs[idx].emFila = true;
-                return true;
+                return true; // Estamos dentro de uma função anonima nesse escopo, que e o remove_if()
             }
             return false;
-        }), filaBloq.end());
+        }), filaBloq.end()); 
     }
     
+    // Função usada em executar() depois de ver as chegadas e ver os desbloqueios
     void alocarProcs() {
-        lock_guard<mutex> lk(mtx);
-        for (int n = 0; n < numNucleos; n++) {
-            if (nucleos[n] == -1 && !filaProntos.empty()) {
-                int idx = filaProntos.front();
-                filaProntos.pop_front();
-                procs[idx].emFila = false;
-                nucleos[n] = idx;
+        lock_guard<mutex> lk(mtx); // Sempre usando o mutex em toda função pois no final ele da unlock() do destruidor da função 
+        for (int n = 0; n < numNucleos; n++) { // pra cada thread
+            // Apenas alocamos caso a thread estiver vazia/Nao em execução (veja threadNucleo()) e tem processos prontos na fila (Nao esta vazia)
+            if (nucleos[n] == -1 && !filaProntos.empty()) { 
+                int idx = filaProntos.front(); // Na frente da fila de prontos (Estamos usando um fifo basicamente)
+
+                filaProntos.pop_front(); // Removemos da fila de prontos pra execução
+
+                procs[idx].emFila = false; // Nao esta mais em fila
+
+                nucleos[n] = idx; // nucleos é um vetor de threads em execução.
+
                 procs[idx].estado = EXECUTANDO;
-                quantumRestante[n] = usarQuantumDin ? calcQuantumDin() : quantumFixo;
-                if (procs[idx].tInicioExec == -1) procs[idx].tInicioExec = tGlobal;
+
+                quantumRestante[n] = usarQuantumDin ? calcQuantumDin() : quantumFixo; // Quantum restante pra essa thread
+
+                if (procs[idx].tInicioExec == -1) procs[idx].tInicioExec = tGlobal; // Na primeira vez que o processo roda tempos que o tempo de execuçaõ dele é igual ao tempo global (chegou agora)
             }
         }
     }
     
+    // Usado na função executar()
     void threadNucleo(int nId) {
         int lastTick = -1;
         while (simAtiva) {
