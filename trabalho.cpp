@@ -17,30 +17,8 @@ using namespace std;
 using namespace this_thread;
 using namespace chrono;
 
-class Barrier {
-private:
-    mutex mtx;
-    condition_variable cv;
-    int count;
-    int generation;
-    int numThreads;
 
-public:
-    explicit Barrier(int numThreads) : count(numThreads), generation(0), numThreads(numThreads) {}
-    
-    void arrive_and_wait() {
-        unique_lock<mutex> lock(mtx);
-        int gen = generation;
-        
-        if (--count == 0) {
-            generation++;
-            count = numThreads;
-            cv.notify_all();
-        } else {
-            cv.wait(lock, [this, gen] { return gen != generation; });
-        }
-    }
-};
+// Aqui tinha uma classe barreira pra sincronização, mas temos contadores de tempo que cada thread herda.
 
 enum Estado {
      PRONTO, 
