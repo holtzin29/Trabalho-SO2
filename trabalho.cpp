@@ -34,6 +34,7 @@ struct Processo {
     Estado estado;
     int tInicioExec, tFim, tEsperaTotal, trocas, tempoBloqRestante, tExecTotal;
     
+    // Construtor da struct, inicialização;
     Processo() : tempoChegada(0), exec1(0), tempoEspera(0), exec2(0),
                  temBloqueio(false), bloqueioExecutado(false), emFila(false),
                  estado(PRONTO), tInicioExec(-1), tFim(0), tEsperaTotal(0), trocas(0),
@@ -122,6 +123,7 @@ private:
     void alocarProcs() {
         lock_guard<mutex> lk(mtx); // Sempre usando o mutex em toda função pois no final ele da unlock() do destruidor da função 
         for (int n = 0; n < numNucleos; n++) { // pra cada thread
+
             // Apenas alocamos caso a thread estiver vazia/Nao em execução (veja threadNucleo()) e tem processos prontos na fila (Nao esta vazia)
             if (nucleos[n] == -1 && !filaProntos.empty()) { 
                 int idx = filaProntos.front(); // Na frente da fila de prontos (Estamos usando um fifo basicamente)
@@ -142,56 +144,75 @@ private:
     }
     
     // Usado na função executar()
-    void threadNucleo(int nId) {
+    void threadNucleo(int nId) { // Id é o iterador (Chamamos em um loop de 0 a N nucleos)
         int lastTick = -1;
-        while (simAtiva) {
+        while (simAtiva) { // Todos os processos estao ativos default, condição de parada é a simulação acabar, todos os processos estarem finalizados.
             int currentTick = tickCnt.load();
-            if (currentTick == lastTick) {
+            if (currentTick == lastTick) { // Contador nao avançou entao dormimos por 1 microsegundo e quebramos o loop ()
                 sleep_for(microseconds(1));
                 continue;
             }
-            lastTick = currentTick;
+            lastTick = currentTick; // Teve um avanço de tick logo ultimoTick igual tick atual
             
-            int idx = nucleos[nId];
+            int idx = nucleos[nId]; // nucleo é um vetor de threads em exec, id é o indice dele.
             
+            // Pro gant atualizar (Registrar que nucleo esta rodando nesse tick)
             {
                 lock_guard<mutex> lg(mtxGantt);
-                if (idx == -1) {
+                if (idx == -1) {  // Caso o nucleo esteja vazio e nao esta executando
                     gantt[nId].push_back(-1);
                 } else {
                     gantt[nId].push_back(idx);
                 }
             }
-            
+            // Caso tenha um processo alocado e executando nesse nucleo
             if (idx != -1) {
                 {
                     lock_guard<mutex> lk(mtx);
-                    procs[idx].tExecTotal--;
-                    quantumRestante[nId]--;
+                    procs[idx].tExecTotal--; // Decrementamos 1 no tempo de execução total do processo (Tempo restante)
+
+                    quantumRestante[nId]--; // Decrementamos 1 no quantum restante do processo por vez 
+
+                    // Só decrementamos 1 por vez para ter sincronismo com o tick global, e cada nucleo executa um processo por vez nessa simulação
+                    // Logo, cada thread controla o quantum apenas do processo executado no momento T.
                     
                     bool precBloq = false;
+                    // Checando se o processo tem bloqueio mas nao executou ainda
+
                     if (procs[idx].temBloqueio && !procs[idx].bloqueioExecutado) {
+
                         int tExec = procs[idx].exec1 + procs[idx].exec2 - procs[idx].tExecTotal;
+
+                      // Mecanismo de proteção, caso o tempo total de execução (tempo1 + tempo2 + tempo total) for maior que o tempo de exec 1,
+                      //  tem que ser bloqueado pra evitar deadlock.
                         if (tExec >= procs[idx].exec1) precBloq = true;
                     }
                     
-                    if (procs[idx].tExecTotal <= 0) {
+                    if (procs[idx].tExecTotal <= 0) { // Acabou
                         procs[idx].estado = FINALIZADO;
                         procs[idx].tFim = tGlobal + 1;
-                        nucleos[nId] = -1;
+                        nucleos[nId] = -1; // Esta vazio, pode ser alocado denovo, veja alocarProcs()
                         numFinalizados++;
-                    } else if (precBloq) {
-                        procs[idx].estado = BLOQUEADO;
+                    } else if (precBloq) { // Precisa ser bloqueado
+                        procs[idx].estado = BLOQUEADO; 
+
                         procs[idx].bloqueioExecutado = true;
-                        procs[idx].tempoBloqRestante = procs[idx].tempoEspera;
-                        filaBloq.push_back(idx);
-                        nucleos[nId] = -1;
-                        procs[idx].trocas++;
-                    } else if (quantumRestante[nId] <= 0) {
+
+                        procs[idx].tempoBloqRestante = procs[idx].tempoEspera; // Veja carregarProcs()
+
+                        filaBloq.push_back(idx); // Entra na fila de bloqueados 
+
+                        nucleos[nId] = -1; // Esta livre pra ser usado, veja alocarProcs()
+
+                        procs[idx].trocas++; // Mais uma troca de contexto pra ele
+
+                    } else if (quantumRestante[nId] <= 0) { // Quantum do processo acabou, troca de contexto, esta pronto pra ser executado de novo assumindo que nao foi bloqueado.
                         procs[idx].estado = PRONTO;
                         filaProntos.push_back(idx);
-                        procs[idx].emFila = true;
-                        nucleos[nId] = -1;
+                        procs[idx].emFila = true; // Volta pra fila de prontos
+
+                        nucleos[nId] = -1; 
+
                         procs[idx].trocas++;
                     }
                 }
@@ -200,7 +221,7 @@ private:
     }
     
     bool todosFinalizados() {
-        return numFinalizados.load() >= procs.size();
+        return numFinalizados.load() >= procs.size(); // Quando todos os processos entraram no contador de finalizados.
     }
     
     void calcEsperaTotal() {
@@ -242,7 +263,7 @@ public:
     }
     
     void executar() {
-        vector<thread> ths;
+        vector<thread> ths; // Vetor de threads pra cada nucleo apenas nesse escopo
         for (int i = 0; i < numNucleos; i++) ths.emplace_back(&Simulador::threadNucleo, this, i);
         
         while (!todosFinalizados()) {
@@ -255,11 +276,15 @@ public:
            sleep_for(milliseconds(1));
             
             tGlobal++;
-            if (tGlobal > 10000) { cout << "Limite excedido!\n"; break; }
+            if (tGlobal > 10000) { 
+                cout << "Limite excedido!\n"; 
+                break; 
+            } 
         }
         
         simAtiva = false;
-        for (auto& t : ths) if (t.joinable()) t.join();
+        for (auto& t : ths) 
+          if (t.joinable()) t.join();
         calcEsperaTotal();
     }
     
@@ -318,7 +343,7 @@ public:
     }
 };
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) { // Numero de argumentos passados na linha de comando
     string arq = "processos.txt";
     int quantum = 2, nucleos = 2;
     bool quantumDin = false;
